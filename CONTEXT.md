@@ -10,7 +10,7 @@ Read this first. It's everything a new coding session needs to keep building.
 
 ## Project: Probe
 
-A closed-loop PCB debugging agent. Input: a schematic image, a photo of the real board and a symptom. Output: ranked likely faults, the next probe point with the expected healthy reading. The user photographs their multimeter, and the loop repeats until one fault is confirmed and a rework is named.
+A closed-loop PCB debugging agent. Input: KiCad source (`.kicad_sch` and/or `.kicad_pcb`, read as text and passed to the reasoner as ground truth for ref designators, pads and nets) or a schematic image, plus a photo of the real board and a symptom. KiCad files are capped at 2M chars each in `kicad_text()`. Output: ranked likely faults, the next probe point with the expected healthy reading. The user photographs their multimeter, and the loop repeats until one fault is confirmed and a rework is named.
 
 Pitch hook: Eghosa's Instagram reel debugging a PCB got 180k views and 100+ comments from people relating and trying to help debug.
 

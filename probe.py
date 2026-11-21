@@ -30,8 +30,11 @@ app = Flask(__name__)
 STATE = {"last_id": None, "expected": None, "log": [], "result": None}
 
 SYSTEM = """You are Probe, a hardware debugging agent working with an engineer at the bench.
-You get a schematic image, a photo of the real PCB, and a symptom.
-Locate the schematic's key nets and components on the board photo.
+You get a photo of the real PCB, a symptom, and the design: a schematic image and/or
+KiCad source files (.kicad_sch schematic, .kicad_pcb layout).
+When KiCad files are present, treat them as ground truth: use their reference designators,
+pad numbers, net names and footprint positions, and match them to what you see on the board photo.
+Name probe points precisely, e.g. "U1 pad 3 (net +3V3)" to "J1 pad 2 (net GND)".
 Reply ONLY with JSON in this shape:
 {"faults": [{"fault": "...", "why": "...", "likelihood": 0.0}],
  "next_probe": {"from": "...", "to": "...", "where_on_board": "...", "meter_mode": "..."},
@@ -92,8 +95,13 @@ def gate(u, what):
     return choice == "usable" and conf >= 0.6
 
 
+def blocks(inputs):
+    # Interactions API needs a list of content dicts, not bare strings.
+    return [{"type": "text", "text": x} if isinstance(x, str) else x for x in inputs]
+
+
 def reason(inputs, previous=None):
-    r = client.interactions.create(model=REASONER, input=inputs, previous_interaction_id=previous)
+    r = client.interactions.create(model=REASONER, input=blocks(inputs), previous_interaction_id=previous)
     STATE["last_id"] = r.id
     out = parse(r.output_text)
     STATE["expected"] = out.get("expected_healthy")
@@ -101,16 +109,37 @@ def reason(inputs, previous=None):
     log(f"{REASONER}: next probe {out.get('next_probe')}, done={out.get('done')}")
 
 
+MAX_KICAD_CHARS = 2_000_000  # keep huge layouts from blowing up the request
+
+
+def kicad_text(field):
+    f = request.files.get(field)
+    if not f or not f.filename:
+        return None
+    text = f.read().decode("utf-8", errors="replace")
+    if len(text) > MAX_KICAD_CHARS:
+        log(f"{f.filename} truncated from {len(text)} to {MAX_KICAD_CHARS} chars")
+        text = text[:MAX_KICAD_CHARS]
+    log(f"Loaded KiCad file {f.filename} ({len(text)} chars)")
+    return f"KiCad file {f.filename}:\n{text}"
+
+
 @app.post("/start")
 def start():
     STATE.update(last_id=None, expected=None, log=[], result=None)
-    sch = upload(request.files["schematic"])
-    brd = upload(request.files["board"])
-    for u, what in [(sch, "schematic"), (brd, "PCB")]:
+    design = [t for t in (kicad_text("kicad_sch"), kicad_text("kicad_pcb")) if t]
+    photos = [(upload(request.files["board"]), "PCB")]
+    sch_file = request.files.get("schematic")
+    if sch_file and sch_file.filename:
+        photos.append((upload(sch_file), "schematic"))
+    if not design and len(photos) == 1:
+        STATE["result"] = {"raw": "Add a schematic image or KiCad files so Probe knows the design."}
+        return page()
+    for u, what in photos:
         if not gate(u, what):
             STATE["result"] = {"raw": f"Retake the {what} photo: straight on, in focus, no glare."}
             return page()
-    reason([SYSTEM, img(sch), img(brd), f"Symptom: {request.form['symptom']}"])
+    reason([SYSTEM, *[img(u) for u, _ in photos], *design, f"Symptom: {request.form['symptom']}"])
     return page()
 
 
@@ -124,7 +153,7 @@ def measure():
         return page()
     reading = client.interactions.create(
         model=READER,
-        input=[img(m), "Read the value on this meter display with units and mode. Reply with only the reading, e.g. '3.28 V DC'."],
+        input=blocks([img(m), "Read the value on this meter display with units and mode. Reply with only the reading, e.g. '3.28 V DC'."]),
     ).output_text.strip()
     log(f"{READER} read the meter: {reading}")
     verdict, conf = decide(
@@ -164,8 +193,10 @@ def page():
 form{{border:1px solid #ccc;border-radius:8px;padding:12px;margin:12px 0}}</style>
 <h1>Probe</h1>
 <form action=/start method=post enctype=multipart/form-data>
-Schematic <input type=file name=schematic accept="image/*" required><br>
-Board <input type=file name=board accept="image/*" capture=environment required><br>
+Board photo <input type=file name=board accept="image/*" capture=environment required><br>
+KiCad schematic <input type=file name=kicad_sch accept=".kicad_sch,.sch"><br>
+KiCad PCB <input type=file name=kicad_pcb accept=".kicad_pcb,.brd"><br>
+Schematic image (if no KiCad) <input type=file name=schematic accept="image/*"><br>
 Symptom <input name=symptom placeholder="LED never turns on" required>
 <button>Start debugging</button></form>
 {body}
